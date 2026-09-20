@@ -107,8 +107,8 @@ Artisan (TC4)  --USB-->  ESP32  --SPI-->  MAX31855  --K-type-->  chamber BT
 | Signal | Where |
 |--------|--------|
 | GND | Logic board ground (confirm with meter — not a random power-board “GND”) |
-| Fan control | **Brown** near **Q8B** |
-| Heat control | **Yellow** near **Q7B** |
+| Fan control | **Brown wire between boards** near **Q8B** |
+| Heat control | **Yellow wire between boards** near **Q7B** |
 | ZCD | **Q6B** collector/pad (logic level — not red/blue, not mains) |
 
 ---
@@ -130,16 +130,18 @@ Artisan (TC4)  --USB-->  ESP32  --SPI-->  MAX31855  --K-type-->  chamber BT
 
 ### Staged bring-up (first-time hardware)
 
-Use `firmware/stages/` if you’re wiring from scratch:
+Use `firmware/stages/` so you prove one connection at a time. **Hold / probe the pad first** (temporary Dupont tip) with Serial open; solder only after that stage looks good for several seconds. Full procedure: **[WIRING.md §8](WIRING.md)**.
 
-| Stage | Sketch | Goal |
-|-------|--------|------|
-| 1 | `stage1_bench_temp` | BT + Artisan `READ` only |
-| 2 | `stage2_zcd` | Confirm ~120 edges/s on ZCD |
-| 3 | `stage3_fan` | Fan PAC, heater disconnected |
-| 4 | `stage4_full` | Heat + fan + safety |
+| Stage | Sketch | What it proves | Hold / touch before soldering |
+|-------|--------|----------------|-------------------------------|
+| 1 | `stage1_bench_temp` | MAX31855 + Artisan `READ` (OT1/OT2 **not** driven) | Nothing on the SR800 — desk only |
+| 2 | `stage2_zcd` | Q6B edge rate (~120/s typical) | GPIO25 tip on **Q6B** (GND already common) |
+| 3 | `stage3_fan` | Fan PAC only | Fan NPN collector on **brown wire between boards** / Q8B; heat left open |
+| 4 | `stage4_full` | Heat + fan + safety cutoffs | Heat NPN collector on **yellow wire between boards** / Q7B — **fan already working** |
 
-After bring-up, switch to the single-file `firmware/sr800/sr800.ino` for daily use.
+Serial Monitor **115200** + Newline. Stage2 prints `zcd_hz=…`; stage3/4 accept `OT2;40`, `OT1;n`, `STAT`, `READ`.
+
+After bring-up, switch to the single-file `firmware/sr800/sr800.ino` for daily use (same behavior as stage4).
 
 ---
 
