@@ -267,10 +267,6 @@ This project stands on a lot of prior work. Thank you to:
 - **Espressif ESP32** Arduino core.
 - **RobotDyn** AC dimmer / zero-cross modules — optional external ZCD path suggested in Homeroasters discussions when stock Q6B is too noisy.
 
-### Related products (inspiration, not copied)
-
-- Commercial/community SR800 computer-control projects (e.g. RoastLink-style Notion/product pages) helped scope “Artisan + stock SR800” as a goal; this repo’s firmware and NPN/Q6B approach were built and validated independently for this hardware.
-
 If we missed a credit you deserve, open an issue or PR.
 
 ---
