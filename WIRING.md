@@ -14,8 +14,8 @@ The stock PIC still runs the front panel. You **parallel** two control nodes so 
 | Signal | Wire / pad (typical) | Transistor silk | ESP |
 |--------|----------------------|-----------------|-----|
 | Logic GND | Black / GND pour | — | ESP **GND** |
-| Fan command | **Brown** | near **Q8B** | GPIO **27** via NPN |
-| Heat command | **Yellow** | near **Q7B** | GPIO **26** via NPN |
+| Fan command | **Brown wire between boards** | near **Q8B** | GPIO **27** via NPN |
+| Heat command | **Yellow wire between boards** | near **Q7B** | GPIO **26** via NPN |
 | Zero-cross | **Q6B** collector/pad | **Q6B** | GPIO **25** (direct sense) |
 
 You are **not** soldering to mains hot/neutral for control. Stay on the **logic / low-voltage** control board unless you deliberately add an isolated AC ZCD module later.
@@ -48,8 +48,8 @@ If you’re unsure, do **not** guess from the power-board earth tab alone.
 
 ### By silk + wire color
 
-1. Locate transistor **Q8B** → the control node / harness wire that leaves this area is typically **brown** = **fan**.  
-2. Locate transistor **Q7B** → typically **yellow** = **heater**.  
+1. Locate transistor **Q8B** → the **brown wire between the logic and power boards** near this area is typically **fan**.  
+2. Locate transistor **Q7B** → the **yellow wire between boards** near this area is typically **heater**.  
 3. These are the nodes the stock PIC already pulls to fire the fan/heat path. You will solder the **NPN collectors** here (in parallel with the stock drive).
 
 ### Confirm with a meter (recommended)
@@ -59,8 +59,6 @@ With the unit still unplugged:
 1. Continuity from the brown wire pad to the Q8B collector/circuit node you intend to tap.  
 2. Same for yellow ↔ Q7B.  
 3. Neither brown nor yellow should be shorted to GND at rest.
-
-Optional live check (careful, isolated, lids as closed as practical): stock front-panel fan/heat changes should move activity on those lines. Prefer unpowered continuity ID when learning the board.
 
 ---
 
@@ -91,7 +89,7 @@ On this build we use the **Q6B** transistor pad on the **logic board** — not r
 2. Power the SR800 (fan can stay low).  
 3. Serial should show roughly **~100–140 edges/s** on 60 Hz with CHANGE-style sensing (both edges ≈ 120 Hz).  
 4. If you see ~60 Hz only, you’re on one edge — still usable but note it.  
-5. If you see 0, noise, or hundreds of kHz of chatter: wrong pad, bad GND, or need more filtering / external ZCD.
+5. If you see 0, junk, or hundreds of kHz of chatter: wrong pad, bad GND, or need more filtering / external ZCD.
 
 ---
 
