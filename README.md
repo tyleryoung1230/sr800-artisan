@@ -1,3 +1,7 @@
+> **WARNING — USE AT YOUR OWN RISK**
+>
+> This is experimental DIY involving **mains-adjacent** work on a coffee roaster. There is **no warranty** and **no liability** — not for property damage, injury, fire, ruined beans, or a **bricked / destroyed SR800**. Boards differ by revision; a wrong solder joint or probe can kill the machine. If you are not comfortable with that, **do not build this**. By using any code, wiring notes, or advice in this repo you accept full responsibility.
+
 # SR800 × Artisan (ESP32)
 
 DIY **Artisan** control for a stock **FreshRoast SR800**: bean temperature (K-type), heater (OT1), and fan (OT2) via an ESP32 speaking the TC4 serial protocol.
@@ -275,4 +279,4 @@ If we missed a credit you deserve, open an issue or PR.
 
 ## Disclaimer
 
-DIY mains / triac-adjacent control. Verify every connection on your SR800. No warranty — see [`LICENSE`](LICENSE).
+**No warranty. No liability. Use at your own risk.** DIY mains / triac-adjacent control can brick your SR800, start a fire, or injure you. Verify every connection on *your* board. See also the warning at the top of this file and [`LICENSE`](LICENSE).
