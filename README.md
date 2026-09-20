@@ -2,8 +2,6 @@
 
 DIY **Artisan** control for a stock **FreshRoast SR800**: bean temperature (K-type), heater (OT1), and fan (OT2) via an ESP32 speaking the TC4 serial protocol.
 
-> **Repo name:** `sr800-artisan` (not “PID” — Artisan can do software PID later; this firmware is TC4-compatible heat/fan/BT control.)
-
 This is **not** a drop-in commercial product. It involves **mains-adjacent wiring** on the SR800 control board. Read the safety section before powering anything.
 
 **Working setup (validated):** single MAX31855 BT probe, NPN open-collector drive of the stock heat/fan transistors, polled ZCD from Q6B, Artisan 4.x as TC4.
@@ -35,41 +33,41 @@ This is **not** a drop-in commercial product. It involves **mains-adjacent wirin
 
 ## Parts list (BOM)
 
-Quantities for one roaster. **Amazon links below are the parts used in this build** (paste/update as needed if ASINs change).
+Quantities for one roaster. Links are the Amazon parts used in this build (ASIN URLs; listings change — double-check before buying).
 
 ### Required
 
 | Part | Qty | Notes | Link |
 |------|-----|--------|------|
-| ESP32 DevKit / ESP-WROOM-32D (30-pin) | 1 | Not ESP32-C3 unless you change pins | *add your Amazon link* |
-| MAX31855 K-type amp breakout | 1 | Pins labeled VIN/GND/DO/CS/CLK are fine | *add your Amazon link* |
-| K-type thermocouple probe | 1 | Sheathed probe for chamber BT | *add your Amazon link* |
-| NPN transistors (2N2222 / 2N3904 / similar) | 2 | Open-collector drive of SR800 yellow/brown | *add your Amazon link* |
-| Resistors 1kΩ | 2 | ESP GPIO → NPN base | *add your Amazon link* |
-| Resistors 10kΩ | 2 | NPN base → GND (failsafe pull-down) | *add your Amazon link* |
-| Hookup wire / Duponts | — | Prefer short SPI + TC leads | *add your Amazon link* |
-| USB cable for ESP32 | 1 | Data-capable | *add your Amazon link* |
+| ESP32 DevKit (ESP-WROOM-32 / 30-pin class) | 1 | Not ESP32-C3 unless you change pins | [Amazon](https://www.amazon.com/dp/B0DPS44HCQ) |
+| MAX31855 K-type amp breakout | 1 | VIN/GND/DO/CS/CLK labeling is fine | [Amazon](https://www.amazon.com/dp/B0C3WXN12V) |
+| K-type thermocouple probe | 1 | Sheathed probe for chamber BT | [Amazon](https://www.amazon.com/dp/B0D95HB4DV) |
+| Electronics kit (NPNs, 1k / 10k resistors, Duponts, etc.) | 1 | Covers transistors, resistors, jumper wire for this build | [Amazon](https://www.amazon.com/dp/B01ERP6WL4) |
+| USB cable for ESP32 | 1 | Data-capable | (usually bundled / any USB-A–Micro or USB-C as needed) |
+
+From the electronics kit you specifically need: **2× NPN** (2N2222 / 2N3904 class), **2× 1kΩ**, **2× 10kΩ**, hookup/Dupont wire.
 
 ### Strongly recommended
 
 | Part | Qty | Notes | Link |
 |------|-----|--------|------|
-| USB isolator (ADUM3160 or similar) | 1 | Breaks ground loops / PC protection | *add your Amazon link* |
-| Breadboard or protoboard | 1 | Then migrate to soldered enclosure | *add your Amazon link* |
-| Probe compression fitting / HT grommet | 1 | Stops a wobbly chamber probe | *add your Amazon link* |
+| USB isolator (ADUM3160 class) | 1 | Between PC and ESP | [Amazon](https://www.amazon.com/dp/B07QKYYCD8) |
+| Proto board kit | 1 | Then migrate off the breadboard | [Amazon](https://www.amazon.com/dp/B0D8VSYQCW) |
+| Long Torx bits | 1 | Opens SR800 bottom case | [Amazon](https://www.amazon.com/dp/B08F79NJNH) |
+| Probe compression fitting / HT grommet | 1 | Stops a wobbly chamber probe | — |
 | Multimeter | 1 | Continuity / voltage checks | — |
 
-### Optional
+### Optional / not required for this firmware path
 
 | Part | Notes | Link |
 |------|--------|------|
-| PC817 optocouplers | Original plan; **NPNs worked more reliably** into the SR800 brown/yellow lines | *add if purchased* |
-| RobotDyn Zero-Cross / AC ZCD module | If stock Q6B ZCD is too noisy under heat | *add if purchased* |
-| Second MAX31855 | Future **ET** (inlet or exhaust) | — |
+| RobotDyn AC dimmer / zero-cross | **Not used** in the validated build; keep as escape hatch if Q6B ZCD is too noisy under heat | [Amazon](https://www.amazon.com/dp/B071X19VL1) |
+| PC817 optocouplers | Often in kits; this build preferred **NPNs** into brown/yellow | (kit) |
+| Second MAX31855 | Future **ET** | — |
 
 ### Consumables / tools
 
-Soldering iron, flux, heat-shrink, zip-ties, drill + bit for probe hole, isopropyl alcohol.
+Soldering iron, flux, heat-shrink, zip-ties, drill + bit for probe hole, isopropyl alcohol. Long Torx bits linked above for case screws.
 
 ---
 
