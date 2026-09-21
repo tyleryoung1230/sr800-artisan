@@ -33,7 +33,11 @@ uint8_t levelOT1 = 0;
 uint8_t levelOT2 = 0;
 bool overtempLatch = false;
 float lastGoodBtC = NAN;  // hold across MAX31855 faults so Artisan doesn't see 0 spikes
+float filtBtC = NAN;      // light EMA after spike rejection
 uint8_t tcFaultCount = 0;
+uint8_t btDropConfirm = 0;  // consecutive samples agreeing on a big drop
+float btDropCandidateC = NAN;
+uint32_t lastBtSampleMs = 0;
 
 bool heatPulseActive = false;
 bool fanPulseActive = false;
@@ -254,46 +258,113 @@ static float toUnit(float celsius) {
   return (tempUnit == UNIT_F) ? (celsius * 9.0f / 5.0f + 32.0f) : celsius;
 }
 
-// Stable BT in °C: reject faults / EMI spikes, hold last good reading.
-static float readBtCelsius() {
-  // Median of 3 quick samples — kills single-bit SPI glitches
-  float a = thermocouple.readCelsius();
-  float b = thermocouple.readCelsius();
-  float c = thermocouple.readCelsius();
-  uint8_t err = thermocouple.readError();
-
-  // sort a<=b<=c
-  if (a > b) { float t = a; a = b; b = t; }
-  if (b > c) { float t = b; b = c; c = t; }
-  if (a > b) { float t = a; a = b; b = t; }
-  float mid = b;
-
-  if (err != 0 || isnan(mid) || isnan(a) || isnan(c)) {
-    tcFaultCount++;
-    return lastGoodBtC;
+// Stable BT in °C: median + spike gate + hold last-good (keeps Artisan/PID sane).
+static float median5(float v0, float v1, float v2, float v3, float v4) {
+  float v[5] = {v0, v1, v2, v3, v4};
+  for (int i = 0; i < 4; i++) {
+    for (int j = i + 1; j < 5; j++) {
+      if (v[j] < v[i]) {
+        float t = v[i];
+        v[i] = v[j];
+        v[j] = t;
+      }
+    }
   }
-
-  if (mid < -20.0f || mid > 400.0f) {
-    tcFaultCount++;
-    return lastGoodBtC;
-  }
-
-  // Open/intermittent TC often collapses toward cold-junction (~room temp)
-  float cj = thermocouple.readInternal();
-  if (!isnan(lastGoodBtC) && !isnan(cj) && lastGoodBtC > 50.0f &&
-      fabsf(mid - cj) < 5.0f) {
-    tcFaultCount++;
-    return lastGoodBtC;
-  }
-
-  if (!isnan(lastGoodBtC) && fabsf(mid - lastGoodBtC) > 30.0f) {
-    tcFaultCount++;
-    return lastGoodBtC;
-  }
-
-  lastGoodBtC = mid;
-  return mid;
+  return v[2];
 }
+
+static float readBtCelsius() {
+  float s0 = thermocouple.readCelsius();
+  float s1 = thermocouple.readCelsius();
+  float s2 = thermocouple.readCelsius();
+  float s3 = thermocouple.readCelsius();
+  float s4 = thermocouple.readCelsius();
+  uint8_t err = thermocouple.readError();
+  float mid = median5(s0, s1, s2, s3, s4);
+  float cj = thermocouple.readInternal();
+  uint32_t now = millis();
+  uint32_t dtMs = (lastBtSampleMs == 0) ? 1000 : (now - lastBtSampleMs);
+  if (dtMs < 1) dtMs = 1;
+  lastBtSampleMs = now;
+
+  auto reject = [&]() -> float {
+    tcFaultCount++;
+    btDropConfirm = 0;
+    btDropCandidateC = NAN;
+    return lastGoodBtC;
+  };
+
+  if (err != 0 || isnan(mid) || isnan(s0) || isnan(s1) || isnan(s2) || isnan(s3) ||
+      isnan(s4)) {
+    return reject();
+  }
+  if (mid < -20.0f || mid > 400.0f) return reject();
+
+  // Spread across the 5 samples → flaky SPI / open TC
+  float lo = s0, hi = s0;
+  float ss[5] = {s0, s1, s2, s3, s4};
+  for (int i = 1; i < 5; i++) {
+    if (ss[i] < lo) lo = ss[i];
+    if (ss[i] > hi) hi = ss[i];
+  }
+  if ((hi - lo) > 15.0f) return reject();
+
+  if (!isnan(lastGoodBtC)) {
+    // Glitch toward cold-junction / room while we were already hot
+    if (!isnan(cj) && lastGoodBtC > 60.0f && mid < (cj + 20.0f) &&
+        (lastGoodBtC - mid) > 25.0f) {
+      return reject();
+    }
+
+    float step = fabsf(mid - lastGoodBtC);
+    // Hard cap: nothing physical jumps >12°C between Artisan polls
+    if (step > 12.0f) {
+      // Big *drops* need 3 agreeing samples before we believe them (EMI often
+      // reads as a sudden plunge; real TP/charge moves are slower).
+      if (mid < lastGoodBtC - 8.0f) {
+        if (btDropConfirm == 0 || isnan(btDropCandidateC) ||
+            fabsf(mid - btDropCandidateC) > 5.0f) {
+          btDropConfirm = 1;
+          btDropCandidateC = mid;
+          tcFaultCount++;
+          return lastGoodBtC;
+        }
+        btDropConfirm++;
+        btDropCandidateC = 0.7f * btDropCandidateC + 0.3f * mid;
+        if (btDropConfirm < 3) {
+          tcFaultCount++;
+          return lastGoodBtC;
+        }
+        // accepted sustained drop — fall through
+        btDropConfirm = 0;
+        btDropCandidateC = NAN;
+      } else {
+        return reject();  // big upward spike: never trust in one sample
+      }
+    } else {
+      btDropConfirm = 0;
+      btDropCandidateC = NAN;
+    }
+
+    // Rate limit ~10°C/s (fluid-bed RoR is far below this)
+    float maxStep = 10.0f * ((float)dtMs / 1000.0f);
+    if (maxStep < 3.0f) maxStep = 3.0f;
+    if (maxStep > 12.0f) maxStep = 12.0f;
+    if (step > maxStep && mid < lastGoodBtC) {
+      // clamp toward last good instead of a cliff
+      mid = lastGoodBtC - maxStep;
+    } else if (step > maxStep) {
+      mid = lastGoodBtC + maxStep;
+    }
+  }
+
+  if (isnan(filtBtC)) filtBtC = mid;
+  else filtBtC = 0.65f * filtBtC + 0.35f * mid;
+
+  lastGoodBtC = filtBtC;
+  return filtBtC;
+}
+
 
 static void respondRead() {
   float rawC = readBtCelsius();
