@@ -202,7 +202,7 @@ Full step-by-step: **[WIRING.md](WIRING.md)** (finding Q6B, soldering NPNs, orde
 | Fan min | Duties 1–4% snap to 0; usable from **5%** (may cog below ~20%) |
 | Heater cutoff | OT1 forced 0 while fan &lt; **22%** |
 | Overtemp | OT1 cut at BT ≥ **500°F**; clears ≤ **480°F** |
-| BT filtering | Soft-SPI MAX31855, median-of-3, hold last-good on faults |
+| BT filtering | Soft-SPI MAX31855, median-of-5, spike/CJ gates, drop confirm, EMA, hold last-good |
 | ZCD | Polled + filtered; under heat uses fixed 60 Hz timing so fan doesn’t surge |
 | Debug spam | Off by default (`DEBUG_SERIAL 0`) so Artisan stays clean |
 
