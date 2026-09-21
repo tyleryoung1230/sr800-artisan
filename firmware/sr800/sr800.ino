@@ -1,1 +1,1 @@
-LOAD_FROM:/tmp/mcp_push_args.json:0
+LOAD_FROM:/tmp/couf_firmware_sr800_sr800.ino:content
