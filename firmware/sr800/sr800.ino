@@ -23,7 +23,11 @@
  * READ TX is formalized: ASCII-only CSV, one atomic write(), deferred until
  * TRIAC gate pulses are idle so we aren't bit-banging USB during the EMI
  * spike we create. That cuts self-mangling; external USB noise can still
- * flip bits in transit — prefer BT (SR800-TC4) for roasting if Monitor shows ����.
+ * flip bits in transit.
+ *
+ * USB roast stability: Classic BT stays OFF by default (BTON to enable).
+ * When Artisan talks on USB we force BT off so SPP reconnect stalls / BT
+ * radio current can't brown out or wedge the USB link mid-roast.
  */
 
 #include <SPI.h>
@@ -36,6 +40,11 @@
 
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth not enabled — use ESP32 board with Classic BT (not ESP32-C3).
+#endif
+
+// 0 = USB-first (recommended). Send BTON over USB if you want SPP.
+#ifndef BT_ENABLE_AT_BOOT
+#define BT_ENABLE_AT_BOOT 0
 #endif
 
 // ----- Pins / config (inlined — DELETE any config.h in this folder) -----
@@ -71,10 +80,17 @@ static bool roastQuiet = false;   // set by Artisan TC4 cmds; VERBOSE;1 clears
 static uint32_t lastArtisanMs = 0;
 
 static bool btStackOk = false;
+static bool btWanted = false;  // user/enabled intent; false during USB Artisan roast
 static volatile bool btNeedRestart = false;
+static esp_reset_reason_t gLastReset = ESP_RST_UNKNOWN;
+RTC_DATA_ATTR uint32_t gBootCount = 0;
 
 static bool btHasClient() {
   return btStackOk && SerialBT.hasClient();
+}
+
+static bool usbArtisanActive() {
+  return roastQuiet && gArtisanPort == &Serial;
 }
 
 // SPP often won't accept a second Mac connect until the stack is bounced.
@@ -85,22 +101,45 @@ static void onBtSppEvent(esp_spp_cb_event_t event, esp_spp_cb_param_t* /*param*/
   }
 }
 
+static void btStopStack(const char* why) {
+  if (!btStackOk) {
+    btNeedRestart = false;
+    return;
+  }
+  Serial.print(F("# BT off ("));
+  Serial.print(why);
+  Serial.println(F(")"));
+  SerialBT.end();
+  btStackOk = false;
+  btNeedRestart = false;
+}
+
 static bool btStartStack() {
+  if (usbArtisanActive()) {
+    Serial.println(F("# BT blocked — USB Artisan active (BTOFF roast mode)"));
+    return false;
+  }
   if (!SerialBT.begin(BT_NAME)) {
     btStackOk = false;
     return false;
   }
   SerialBT.register_callback(onBtSppEvent);
   btStackOk = true;
+  btWanted = true;
   btNeedRestart = false;
   return true;
 }
 
 static void btRestartStack(const char* why) {
+  if (!btWanted || usbArtisanActive()) {
+    btNeedRestart = false;
+    return;
+  }
   Serial.print(F("# BT SPP restart ("));
   Serial.print(why);
   Serial.println(F(")…"));
   SerialBT.end();
+  btStackOk = false;
   delay(120);
   if (btStartStack()) {
     Serial.println(F("# BT SPP listening again — reconnect Mac / Artisan"));
@@ -120,6 +159,12 @@ static void markArtisanActive() {
   lastArtisanMs = millis();
   roastQuiet = true;
   rawTempMode = false;  // RAW spam must never run under Artisan
+  // USB control path: kill Classic BT so reconnect delays / radio current
+  // can't stall PAC or knock USB offline mid-roast.
+  if (gReply == &Serial && btStackOk) {
+    btWanted = false;
+    btStopStack("USB Artisan");
+  }
 }
 
 // Artisan/TC4 replies → requesting port only (explicit overloads; Arduino IDE
@@ -759,9 +804,10 @@ static void serviceOvertemp() {
 }
 
 static void printResetReason() {
-  esp_reset_reason_t r = esp_reset_reason();
+  gLastReset = esp_reset_reason();
+  gBootCount++;
   logPrint(F("# reset="));
-  switch (r) {
+  switch (gLastReset) {
     case ESP_RST_POWERON: logPrintln(F("POWERON")); break;
     case ESP_RST_SW: logPrintln(F("SW")); break;
     case ESP_RST_PANIC: logPrintln(F("PANIC")); break;
@@ -770,7 +816,19 @@ static void printResetReason() {
     case ESP_RST_WDT: logPrintln(F("WDT")); break;
     case ESP_RST_BROWNOUT: logPrintln(F("BROWNOUT")); break;
     case ESP_RST_SDIO: logPrintln(F("SDIO")); break;
-    default: logPrintln((int)r); break;
+    default: logPrintln((int)gLastReset); break;
+  }
+  logPrint(F("# boots="));
+  logPrint((unsigned long)gBootCount);
+  logPrintln();
+  // These usually mean "Artisan USB dropped" was actually an ESP reboot.
+  if (gLastReset == ESP_RST_BROWNOUT) {
+    logPrintln(F("# !! BROWNOUT — weak USB 5V / EMI; use short cable + isolator, or 5V on VIN"));
+  } else if (gLastReset == ESP_RST_INT_WDT || gLastReset == ESP_RST_TASK_WDT ||
+             gLastReset == ESP_RST_WDT) {
+    logPrintln(F("# !! WDT reboot — was crashing under load; note OT1/OT2 when it dies"));
+  } else if (gLastReset == ESP_RST_SW) {
+    logPrintln(F("# SW reset — often DTR/RTS from opening Serial (Artisan/Monitor)"));
   }
 }
 
@@ -808,12 +866,31 @@ static void handleCommand(String line) {
     replyPrint(F(" bt="));
     replyPrint(btHasClient() ? 1 : 0);
     replyPrint(F(" btOk="));
-    replyPrintln(btStackOk ? 1 : 0);
+    replyPrint(btStackOk ? 1 : 0);
+    replyPrint(F(" btWant="));
+    replyPrint(btWanted ? 1 : 0);
+    replyPrint(F(" boots="));
+    replyPrint((unsigned long)gBootCount);
+    replyPrint(F(" rst="));
+    replyPrintln((int)gLastReset);
+    return;
+  }
+  if (line == "BTON") {
+    btWanted = true;
+    if (btStartStack()) replyPrintln(F("# BT on — SR800-TC4 listening"));
+    else replyPrintln(F("# BT on FAILED"));
+    return;
+  }
+  if (line == "BTOFF") {
+    btWanted = false;
+    btStopStack("BTOFF");
+    replyPrintln(F("# BT off"));
     return;
   }
   if (line == "BTRESTART") {
     // Manual recovery when Mac won't reconnect (also auto on drop)
     replyPrintln(F("# BTRESTART"));
+    btWanted = true;
     btNeedRestart = false;
     btRestartStack("cmd");
     return;
@@ -1083,7 +1160,8 @@ static bool cmdLooksComplete(const String& s) {
          s.equalsIgnoreCase("RESET") || s.equalsIgnoreCase("RAW") ||
          s.equalsIgnoreCase("RAWON") || s.equalsIgnoreCase("RAWOFF") ||
          s.equalsIgnoreCase("VERBOSE") || s.equalsIgnoreCase("QUIET") ||
-         s.equalsIgnoreCase("NOISY") || s.equalsIgnoreCase("BTRESTART");
+         s.equalsIgnoreCase("NOISY") || s.equalsIgnoreCase("BTRESTART") ||
+         s.equalsIgnoreCase("BTON") || s.equalsIgnoreCase("BTOFF");
 }
 
 static bool serialCmdCharOk(char c) {
@@ -1134,6 +1212,20 @@ static void serviceSerial() {
 // After Mac/Artisan drops SPP, bounce the server and fail-safe heater.
 // (Defined here so levelOT1 / heatAllOff are in scope — Arduino .ino is picky.)
 static void serviceBluetooth() {
+  if (!btWanted) {
+    btNeedRestart = false;
+    return;
+  }
+  if (usbArtisanActive()) {
+    // Should already be stopped by markArtisanActive; belt-and-suspenders.
+    if (btStackOk) {
+      btWanted = false;
+      btStopStack("USB Artisan");
+    }
+    btNeedRestart = false;
+    return;
+  }
+
   static bool hadClient = false;
   bool client = btHasClient();
 
@@ -1161,18 +1253,26 @@ static void serviceBluetooth() {
 }
 
 void setup() {
+  // Larger USB UART FIFOs — fewer overruns when heater EMI hits the link
+  Serial.setRxBufferSize(1024);
+  Serial.setTxBufferSize(1024);
   Serial.begin(SERIAL_BAUD);
   delay(300);
 
-  // Bluetooth Classic SPP — pair on Mac as "SR800-TC4", then Artisan TC4 on that cu.* port
+  gReply = &Serial;
+  gRawOut = &Serial;
+
+#if BT_ENABLE_AT_BOOT
   if (!btStartStack()) {
     Serial.println(F("# BT start FAILED — USB-only mode"));
   } else {
     Serial.print(F("# BT SPP ready as "));
     Serial.println(BT_NAME);
   }
-  gReply = &Serial;
-  gRawOut = &Serial;
+#else
+  btWanted = false;
+  Serial.println(F("# BT off at boot (USB roast mode). Send BTON for SPP."));
+#endif
 
   pinMode(PIN_OT1_HEATER, OUTPUT);
   pinMode(PIN_OT2_FAN, OUTPUT);
@@ -1191,12 +1291,10 @@ void setup() {
   printResetReason();
   logPrintln(F("# stage4 READY — OT1 cuts at BT>=500F (clears <480F)"));
   logPrintln(F("# OT1/OT2 need Newline (Artisan OK). FAN_MIN=5 heatCutoff=22"));
-  logPrintln(F("# Link: USB Serial and/or Bluetooth SPP name SR800-TC4"));
-  logPrintln(F("# First Artisan READ/CHAN/OTx → roast-quiet (no # ZCD-BAD spam)"));
-  logPrintln(F("# VERBOSE;1 = diag spam on; QUIET / Artisan cmds = quiet"));
-  logPrintln(F("# STAT works while quiet; RAW;1 for probe bench (close Artisan)"));
-  logPrintln(F("# BT filter: no 0/nan emit; ambient glitch hard-reject; drop needs 5×/4s"));
-  logPrintln(F("# BT auto-restarts SPP after drop; USB: BTRESTART if Mac stuck"));
+  logPrintln(F("# Artisan USB = CP2102 port @ 115200; BT optional via BTON"));
+  logPrintln(F("# USB Artisan auto-kills BT (stops SPP restart stalls mid-roast)"));
+  logPrintln(F("# After a drop: open Monitor, note # reset=… / STAT rst= / boots="));
+  logPrintln(F("# BROWNOUT → power/EMI; SW → serial reopen reset; WDT → firmware hang"));
 }
 
 void loop() {
