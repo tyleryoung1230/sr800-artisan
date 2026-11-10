@@ -74,6 +74,12 @@ static bool btHasClient() {
   return SerialBT.hasClient();
 }
 
+// Declared later — .ino prototype gen breaks templates, so no template<> helpers
+extern bool rawTempMode;
+extern bool heatPulseActive;
+extern bool fanPulseActive;
+static void servicePhase();
+
 static void markArtisanActive() {
   gArtisanPort = gReply;
   lastArtisanMs = millis();
@@ -81,16 +87,20 @@ static void markArtisanActive() {
   rawTempMode = false;  // RAW spam must never run under Artisan
 }
 
-// Artisan/TC4 replies → requesting port only
-template <typename T>
-static void replyPrint(T v) { gReply->print(v); }
+// Artisan/TC4 replies → requesting port only (explicit overloads; Arduino IDE
+// strips/breaks template <typename T> in .ino files)
+static void replyPrint(const __FlashStringHelper* v) { gReply->print(v); }
+static void replyPrint(const char* v) { gReply->print(v); }
+static void replyPrint(int v) { gReply->print(v); }
+static void replyPrint(unsigned int v) { gReply->print(v); }
+static void replyPrint(unsigned long v) { gReply->print(v); }
+static void replyPrint(long v) { gReply->print(v); }
 static void replyPrintln() { gReply->println(); }
-template <typename T>
-static void replyPrintln(T v) { gReply->println(v); }
-
-static void servicePhase();  // fwd — keep PAC alive while deferring TX
-extern bool heatPulseActive; // defined below with other phase-angle state
-extern bool fanPulseActive;
+static void replyPrintln(const __FlashStringHelper* v) { gReply->println(v); }
+static void replyPrintln(const char* v) { gReply->println(v); }
+static void replyPrintln(int v) { gReply->println(v); }
+static void replyPrintln(unsigned int v) { gReply->println(v); }
+static void replyPrintln(unsigned long v) { gReply->println(v); }
 
 // Last good READ CSV (no newline) — fallback if format sanitize fails
 static char lastArtisanCsv[96] = "0.00,0.00,0.00,0.00,0.00,0,0";
