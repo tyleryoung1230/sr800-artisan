@@ -19,7 +19,11 @@
  * Unsolicited # ZCD-BAD / failsafe spam on that port can steal the line
  * (→ −1 drops). After the first Artisan TC4 command we go roast-quiet:
  * only command replies on that port — no diag chatter. VERBOSE;1 re-enables.
- * Wire EMI (����) still can't be un-garbled after TX — prefer BT for roasting.
+ *
+ * READ TX is formalized: ASCII-only CSV, one atomic write(), deferred until
+ * TRIAC gate pulses are idle so we aren't bit-banging USB during the EMI
+ * spike we create. That cuts self-mangling; external USB noise can still
+ * flip bits in transit — prefer BT (SR800-TC4) for roasting if Monitor shows ����.
  */
 
 #include <SPI.h>
@@ -28,6 +32,7 @@
 #include <esp_system.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth not enabled — use ESP32 board with Classic BT (not ESP32-C3).
@@ -82,6 +87,71 @@ static void replyPrint(T v) { gReply->print(v); }
 static void replyPrintln() { gReply->println(); }
 template <typename T>
 static void replyPrintln(T v) { gReply->println(v); }
+
+static void servicePhase();  // fwd — keep PAC alive while deferring TX
+extern bool heatPulseActive; // defined below with other phase-angle state
+extern bool fanPulseActive;
+
+// Last good READ CSV (no newline) — fallback if format sanitize fails
+static char lastArtisanCsv[96] = "0.00,0.00,0.00,0.00,0.00,0,0";
+
+static bool csvByteOk(char c) {
+  return (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ',';
+}
+
+static bool txElectricallyQuiet() {
+  return !heatPulseActive && !fanPulseActive;
+}
+
+// Don't shift UART bits while our own TRIAC gate is slamming the mains.
+// Artisan waits ~100ms after READ before readline — budget a few ms here.
+static void waitTxQuietWindow() {
+  const uint32_t maxWaitUs = 6000;
+  uint32_t t0 = micros();
+  while (!txElectricallyQuiet()) {
+    servicePhase();
+    if ((uint32_t)(micros() - t0) >= maxWaitUs) break;
+  }
+  // ~200µs settle after gate-off edge
+  uint32_t t1 = micros();
+  while ((uint32_t)(micros() - t1) < 200) {
+    servicePhase();
+  }
+}
+
+// Stock Artisan CSV only: sanitize → single write(buf) incl. '\\n'. No multi-print.
+static void replyArtisanCsv(const char* csv) {
+  char body[96];
+  size_t n = 0;
+  bool ok = true;
+  for (const char* p = csv; *p; ++p) {
+    if (!csvByteOk(*p)) {
+      ok = false;
+      break;
+    }
+    if (n + 1 >= sizeof(body)) {
+      ok = false;
+      break;
+    }
+    body[n++] = *p;
+  }
+  body[n] = '\0';
+  if (!ok || n < 11) {  // bare minimum "0.00,0.00,0"
+    strncpy(body, lastArtisanCsv, sizeof(body) - 1);
+    body[sizeof(body) - 1] = '\0';
+    n = strlen(body);
+  } else {
+    memcpy(lastArtisanCsv, body, n + 1);
+  }
+
+  char out[100];
+  if (n + 1 >= sizeof(out)) n = sizeof(out) - 2;
+  memcpy(out, body, n);
+  out[n++] = '\n';
+
+  waitTxQuietWindow();
+  gReply->write(reinterpret_cast<const uint8_t*>(out), n);
+}
 
 // Unsolicited diag/failsafe logs. Skip entirely while roast-quiet so stock
 // Artisan never readline()'s a # ZCD-BAD instead of the READ CSV.
@@ -164,7 +234,7 @@ static const uint32_t BT_DROP_NEED_MS = 4000;     // and ≥4s wall clock
 static const float BT_DROP_DELTA_C = 8.0f;        // single-step drop threshold
 static const float BT_CJ_NEAR_C = 25.0f;          // mid within CJ+this = ambient glitch
 
-bool heatPulseActive = false;
+bool heatPulseActive = false;  // also referenced earlier via extern for TX quiet-window
 bool fanPulseActive = false;
 uint32_t heatPulseEndUs = 0;
 uint32_t fanPulseEndUs = 0;
@@ -569,17 +639,24 @@ static void respondRead() {
       // do NOT store as lastGood — only lastSent so we don't poison filter
       lastSentBtC = rawC;
     } else {
-      replyPrintln(F("0.00,0.00,0.00,0.00,0.00,0,0"));  // truly no data
+      replyArtisanCsv("0.00,0.00,0.00,0.00,0.00,0,0");  // truly no data
       return;
     }
+  }
+
+  // Guard non-finite → snprintf "nan"/"inf" would break Artisan float()
+  if (!isfinite(amb)) amb = 0.0f;
+  if (!isfinite(bt)) {
+    if (!isnan(lastSentBtC)) bt = toUnit(lastSentBtC);
+    else bt = amb;
   }
 
   uint8_t heatOut = effectiveHeat(levelOT1, levelOT2);
   char line[96];
   snprintf(line, sizeof(line), "%.2f,%.2f,%.2f,0.00,0.00,%u,%u",
-           isnan(amb) ? 0.0f : amb, bt, bt,
+           amb, bt, bt,
            (unsigned)heatOut, (unsigned)levelOT2);
-  replyPrintln(line);
+  replyArtisanCsv(line);
 }
 
 static uint8_t parseDuty(const String& s) {
