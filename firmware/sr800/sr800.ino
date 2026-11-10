@@ -70,8 +70,72 @@ static Print* gArtisanPort = nullptr;
 static bool roastQuiet = false;   // set by Artisan TC4 cmds; VERBOSE;1 clears
 static uint32_t lastArtisanMs = 0;
 
+static bool btStackOk = false;
+static volatile bool btNeedRestart = false;
+
 static bool btHasClient() {
-  return SerialBT.hasClient();
+  return btStackOk && SerialBT.hasClient();
+}
+
+// SPP often won't accept a second Mac connect until the stack is bounced.
+// Do NOT call end()/begin() from this callback — set a flag for loop().
+static void onBtSppEvent(esp_spp_cb_event_t event, esp_spp_cb_param_t* /*param*/) {
+  if (event == ESP_SPP_CLOSE_EVT) {
+    btNeedRestart = true;
+  }
+}
+
+static bool btStartStack() {
+  if (!SerialBT.begin(BT_NAME)) {
+    btStackOk = false;
+    return false;
+  }
+  SerialBT.register_callback(onBtSppEvent);
+  btStackOk = true;
+  btNeedRestart = false;
+  return true;
+}
+
+static void btRestartStack(const char* why) {
+  Serial.print(F("# BT SPP restart ("));
+  Serial.print(why);
+  Serial.println(F(")…"));
+  SerialBT.end();
+  delay(120);
+  if (btStartStack()) {
+    Serial.println(F("# BT SPP listening again — reconnect Mac / Artisan"));
+  } else {
+    Serial.println(F("# BT restart FAILED — use USB or power-cycle ESP"));
+  }
+}
+
+// After Mac/Artisan drops SPP, bounce the server and fail-safe heater.
+static void serviceBluetooth() {
+  static bool hadClient = false;
+  bool client = btHasClient();
+
+  if (hadClient && !client) {
+    cmdBufBt = "";
+    if (gArtisanPort == static_cast<Print*>(&SerialBT)) {
+      levelOT1 = 0;
+      heatAllOff();
+      gArtisanPort = nullptr;
+      roastQuiet = false;
+      Serial.println(F("# BT dropped — OT1 cut (fan holds last OT2)"));
+    } else {
+      Serial.println(F("# BT client gone"));
+    }
+    btNeedRestart = true;
+  } else if (client && !hadClient) {
+    Serial.println(F("# BT client connected"));
+  }
+  hadClient = client;
+
+  if (btNeedRestart && !client) {
+    btNeedRestart = false;
+    btRestartStack("disconnect");
+    hadClient = false;
+  }
 }
 
 // Declared later — .ino prototype gen breaks templates, so no template<> helpers
@@ -769,7 +833,18 @@ static void handleCommand(String line) {
     replyPrint(F(" tcFaults="));
     replyPrint(tcFaultCount);
     replyPrint(F(" quiet="));
-    replyPrintln(roastQuiet ? 1 : 0);
+    replyPrint(roastQuiet ? 1 : 0);
+    replyPrint(F(" bt="));
+    replyPrint(btHasClient() ? 1 : 0);
+    replyPrint(F(" btOk="));
+    replyPrintln(btStackOk ? 1 : 0);
+    return;
+  }
+  if (line == "BTRESTART") {
+    // Manual recovery when Mac won't reconnect (also auto on drop)
+    replyPrintln(F("# BTRESTART"));
+    btNeedRestart = false;
+    btRestartStack("cmd");
     return;
   }
   if (line == "VERBOSE" || line == "VERBOSE;1" || line == "NOISY") {
@@ -1037,7 +1112,7 @@ static bool cmdLooksComplete(const String& s) {
          s.equalsIgnoreCase("RESET") || s.equalsIgnoreCase("RAW") ||
          s.equalsIgnoreCase("RAWON") || s.equalsIgnoreCase("RAWOFF") ||
          s.equalsIgnoreCase("VERBOSE") || s.equalsIgnoreCase("QUIET") ||
-         s.equalsIgnoreCase("NOISY");
+         s.equalsIgnoreCase("NOISY") || s.equalsIgnoreCase("BTRESTART");
 }
 
 static bool serialCmdCharOk(char c) {
@@ -1090,7 +1165,7 @@ void setup() {
   delay(300);
 
   // Bluetooth Classic SPP — pair on Mac as "SR800-TC4", then Artisan TC4 on that cu.* port
-  if (!SerialBT.begin(BT_NAME)) {
+  if (!btStartStack()) {
     Serial.println(F("# BT start FAILED — USB-only mode"));
   } else {
     Serial.print(F("# BT SPP ready as "));
@@ -1121,12 +1196,14 @@ void setup() {
   logPrintln(F("# VERBOSE;1 = diag spam on; QUIET / Artisan cmds = quiet"));
   logPrintln(F("# STAT works while quiet; RAW;1 for probe bench (close Artisan)"));
   logPrintln(F("# BT filter: no 0/nan emit; ambient glitch hard-reject; drop needs 5×/4s"));
+  logPrintln(F("# BT auto-restarts SPP after drop; USB: BTRESTART if Mac stuck"));
 }
 
 void loop() {
   serviceSerial();
   servicePhase();
   serviceSerial();
+  serviceBluetooth();
   serviceOvertemp();
   serviceWatchdog();
   serviceZcdDiag();
