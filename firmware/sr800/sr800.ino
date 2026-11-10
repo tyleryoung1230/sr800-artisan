@@ -326,6 +326,15 @@ static const float BT_CJ_NEAR_C = 25.0f;          // mid within CJ+this = ambien
 // Last line of defense for Artisan plot — max change per READ emit (~1Hz)
 static const float ARTISAN_MAX_DOWN_C = 2.0f;
 static const float ARTISAN_MAX_UP_C = 6.0f;
+// Background ring: MAX31855 converts ~10Hz — space samples, don't triple-read same result
+static const uint8_t BT_RING_N = 5;
+static const uint32_t BT_RING_PERIOD_MS = 100;
+static float btRingC[BT_RING_N];
+static uint8_t btRingErr[BT_RING_N];
+static uint8_t btRingIdx = 0;
+static uint8_t btRingFill = 0;
+static uint32_t btRingLastMs = 0;
+static uint8_t btRingFaultStreak = 0;
 
 bool heatPulseActive = false;  // also referenced earlier via extern for TX quiet-window
 bool fanPulseActive = false;
@@ -565,38 +574,82 @@ static bool looksLikeAmbientGlitch(float mid, float cj, float lastC) {
   return false;
 }
 
+// Continuous ~10Hz sampler — each slot is a *different* MAX31855 conversion.
+static void serviceBtSampler() {
+  uint32_t now = millis();
+  if (btRingLastMs != 0 && (now - btRingLastMs) < BT_RING_PERIOD_MS) return;
+  btRingLastMs = now;
+
+  float c = thermocouple.readCelsius();
+  uint8_t err = thermocouple.readError();
+  btRingC[btRingIdx] = c;
+  btRingErr[btRingIdx] = err;
+  btRingIdx = (uint8_t)((btRingIdx + 1) % BT_RING_N);
+  if (btRingFill < BT_RING_N) btRingFill++;
+
+  if (err != 0 || isnan(c)) {
+    if (btRingFaultStreak < 255) btRingFaultStreak++;
+  } else {
+    btRingFaultStreak = 0;
+  }
+}
+
+// Median of recent *valid* ring samples. Needs ≥2 good conversions.
+static bool btRingMedian(float* outMid, float* outSpread) {
+  float vals[BT_RING_N];
+  int n = 0;
+  for (uint8_t i = 0; i < btRingFill; i++) {
+    if (btRingErr[i] != 0) continue;
+    float v = btRingC[i];
+    if (isnan(v) || v < -20.0f || v > 400.0f) continue;
+    vals[n++] = v;
+  }
+  if (n < 2) return false;
+  // insertion sort — n≤5
+  for (int i = 1; i < n; i++) {
+    float key = vals[i];
+    int j = i - 1;
+    while (j >= 0 && vals[j] > key) {
+      vals[j + 1] = vals[j];
+      j--;
+    }
+    vals[j + 1] = key;
+  }
+  *outMid = vals[n / 2];
+  *outSpread = vals[n - 1] - vals[0];
+  return true;
+}
+
 // forArtisanRead=true advances drop-confirm; overtemp path must pass false
 // so 500ms OT checks don't accelerate false drop acceptance.
 static float readBtCelsius(bool forArtisanRead) {
-  float s0 = thermocouple.readCelsius();
-  float s1 = thermocouple.readCelsius();
-  float s2 = thermocouple.readCelsius();
-  uint8_t err = thermocouple.readError();
-  // 3 reads only — MAX31855 ~10Hz so 5 back-to-back were usually identical anyway
-  float mid = s0;
-  if (!isnan(s0) && !isnan(s1) && !isnan(s2)) {
-    // median of 3
-    if (s0 > s1) { float t = s0; s0 = s1; s1 = t; }
-    if (s1 > s2) { float t = s1; s1 = s2; s2 = t; }
-    if (s0 > s1) { float t = s0; s0 = s1; s1 = t; }
-    mid = s1;
-  }
+  serviceBtSampler();  // ensure at least one fresh attempt
+
+  float mid = NAN;
+  float spread = 0.0f;
+  uint8_t err = 0;
   float cj = thermocouple.readInternal();
+
+  if (forArtisanRead) {
+    // Prefer ring median (multiple conversions over ~0.5s) over one SPI grab
+    if (!btRingMedian(&mid, &spread)) {
+      err = 1;
+    } else if (spread > 12.0f) {
+      err = 1;  // ring disagreeing → treat as fault, hold last-good
+    }
+  } else {
+    mid = thermocouple.readCelsius();
+    err = thermocouple.readError();
+    spread = 0.0f;
+  }
+
   uint32_t now = millis();
   uint32_t dtMs = (lastBtSampleMs == 0) ? 1000 : (now - lastBtSampleMs);
   if (dtMs < 1) dtMs = 1;
   lastBtSampleMs = now;
 
-  if (err != 0 || isnan(mid) || isnan(s0)) {
-    tcFaultCount++;
-    if (forArtisanRead) {
-      btDropConfirm = 0;
-      btDropCandidateC = NAN;
-      btDropStartMs = 0;
-    }
-    return lastGoodBtC;  // may be NAN if never locked — caller must not emit 0
-  }
-  if (mid < -20.0f || mid > 400.0f) {
+  // Burst of faults → hold (don't let Artisan chase noise)
+  if (btRingFaultStreak >= 3) {
     tcFaultCount++;
     if (forArtisanRead) {
       btDropConfirm = 0;
@@ -606,11 +659,16 @@ static float readBtCelsius(bool forArtisanRead) {
     return lastGoodBtC;
   }
 
-  // Spread across the burst → flaky SPI
-  float lo = s0, hi = s0;
-  if (!isnan(s1)) { if (s1 < lo) lo = s1; if (s1 > hi) hi = s1; }
-  if (!isnan(s2)) { if (s2 < lo) lo = s2; if (s2 > hi) hi = s2; }
-  if ((hi - lo) > 12.0f) {
+  if (err != 0 || isnan(mid)) {
+    tcFaultCount++;
+    if (forArtisanRead) {
+      btDropConfirm = 0;
+      btDropCandidateC = NAN;
+      btDropStartMs = 0;
+    }
+    return lastGoodBtC;  // may be NAN if never locked — caller must not emit 0
+  }
+  if (mid < -20.0f || mid > 400.0f) {
     tcFaultCount++;
     if (forArtisanRead) {
       btDropConfirm = 0;
@@ -896,7 +954,11 @@ static void handleCommand(String line) {
     replyPrint(F(" boots="));
     replyPrint((unsigned long)gBootCount);
     replyPrint(F(" rst="));
-    replyPrintln((int)gLastReset);
+    replyPrint((int)gLastReset);
+    replyPrint(F(" ring="));
+    replyPrint(btRingFill);
+    replyPrint(F(" faultStreak="));
+    replyPrintln(btRingFaultStreak);
     return;
   }
   if (line == "BTON") {
@@ -1324,6 +1386,7 @@ void setup() {
 void loop() {
   serviceSerial();
   servicePhase();
+  serviceBtSampler();
   serviceSerial();
   serviceBluetooth();
   serviceOvertemp();
