@@ -319,10 +319,13 @@ uint8_t btDropConfirm = 0;  // consecutive agreeing low samples
 float btDropCandidateC = NAN;
 uint32_t btDropStartMs = 0;   // wall-clock start of drop candidate
 uint32_t lastBtSampleMs = 0;
-static const uint8_t BT_DROP_NEED_N = 5;          // was 3 — need more agreement
-static const uint32_t BT_DROP_NEED_MS = 4000;     // and ≥4s wall clock
-static const float BT_DROP_DELTA_C = 8.0f;        // single-step drop threshold
+static const uint8_t BT_DROP_NEED_N = 8;          // agree this many READ samples
+static const uint32_t BT_DROP_NEED_MS = 8000;     // and ≥8s wall clock
+static const float BT_DROP_DELTA_C = 6.0f;        // single-step drop threshold (°C)
 static const float BT_CJ_NEAR_C = 25.0f;          // mid within CJ+this = ambient glitch
+// Last line of defense for Artisan plot — max change per READ emit (~1Hz)
+static const float ARTISAN_MAX_DOWN_C = 2.0f;
+static const float ARTISAN_MAX_UP_C = 6.0f;
 
 bool heatPulseActive = false;  // also referenced earlier via extern for TX quiet-window
 bool fanPulseActive = false;
@@ -656,7 +659,13 @@ static float readBtCelsius(bool forArtisanRead) {
         tcFaultCount++;
         return lastGoodBtC;
       }
-      // sustained real drop accepted
+      // Hot roast + big plunge: demand even longer (charge is gradual; EMI isn't)
+      if (lastGoodBtC > 100.0f && (lastGoodBtC - btDropCandidateC) > 25.0f &&
+          lived < 15000) {
+        tcFaultCount++;
+        return lastGoodBtC;
+      }
+      // sustained real drop accepted into filter (Artisan emit still slew-limited)
       mid = btDropCandidateC;
       btDropConfirm = 0;
       btDropCandidateC = NAN;
@@ -698,14 +707,43 @@ static float readBtCelsius(bool forArtisanRead) {
 
 static void respondRead() {
   float rawC = readBtCelsius(true);
+  float ambC = thermocouple.readInternal();
+
   // Never emit 0/nan BT to Artisan (0°C→32°F glitch / 0°F cliff)
   if (isnan(rawC)) {
     if (!isnan(lastSentBtC)) rawC = lastSentBtC;
     else if (!isnan(lastGoodBtC)) rawC = lastGoodBtC;
   }
+
+  // Emit slew clamp — Artisan plots whatever we send; never cliff in one sample.
+  // (Filter may eventually accept a real drop; we ease Artisan there ≤2°C/READ.)
+  if (!isnan(rawC) && !isnan(lastSentBtC)) {
+    if (looksLikeAmbientGlitch(rawC, ambC, lastSentBtC)) {
+      rawC = lastSentBtC;
+    } else {
+      float d = rawC - lastSentBtC;
+      if (d < -ARTISAN_MAX_DOWN_C) rawC = lastSentBtC - ARTISAN_MAX_DOWN_C;
+      else if (d > ARTISAN_MAX_UP_C) rawC = lastSentBtC + ARTISAN_MAX_UP_C;
+    }
+    // Hot roast: refuse room-ish emits even if filter slipped
+    if (lastSentBtC > 80.0f && rawC < 50.0f) rawC = lastSentBtC;
+  }
+
+  // Still no BT lock — CJ only before first lock (desk). Never replace a hot
+  // lastSent with ambient (that was a classic Artisan cliff).
+  if (isnan(rawC)) {
+    if (!isnan(lastSentBtC)) {
+      rawC = lastSentBtC;
+    } else if (!isnan(ambC)) {
+      rawC = ambC;
+    } else {
+      replyArtisanCsv("0.00,0.00,0.00,0.00,0.00,0,0");
+      return;
+    }
+  }
+
   if (!isnan(rawC)) lastSentBtC = rawC;
 
-  float ambC = thermocouple.readInternal();
   float amb = toUnit(ambC);
   float bt = toUnit(rawC);
 
@@ -720,25 +758,11 @@ static void respondRead() {
     }
   }
 
-  // Still no BT lock — send amb for ambient only; repeat amb as BT placeholder
-  // is worse than holding. Skip inventing 0: use CJ only if nothing else exists.
-  if (isnan(rawC) || isnan(bt)) {
-    if (!isnan(ambC)) {
-      rawC = ambC;  // last resort before first lock (desk boot)
-      bt = toUnit(rawC);
-      // do NOT store as lastGood — only lastSent so we don't poison filter
-      lastSentBtC = rawC;
-    } else {
-      replyArtisanCsv("0.00,0.00,0.00,0.00,0.00,0,0");  // truly no data
-      return;
-    }
-  }
-
   // Guard non-finite → snprintf "nan"/"inf" would break Artisan float()
   if (!isfinite(amb)) amb = 0.0f;
   if (!isfinite(bt)) {
-    if (!isnan(lastSentBtC)) bt = toUnit(lastSentBtC);
-    else bt = amb;
+    bt = toUnit(lastSentBtC);
+    if (!isfinite(bt)) bt = 0.0f;
   }
 
   uint8_t heatOut = effectiveHeat(levelOT1, levelOT2);
