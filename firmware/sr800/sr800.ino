@@ -115,7 +115,6 @@ static void serviceBluetooth() {
   bool client = btHasClient();
 
   if (hadClient && !client) {
-    cmdBufBt = "";
     if (gArtisanPort == static_cast<Print*>(&SerialBT)) {
       levelOT1 = 0;
       heatAllOff();
