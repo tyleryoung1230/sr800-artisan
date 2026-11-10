@@ -109,34 +109,6 @@ static void btRestartStack(const char* why) {
   }
 }
 
-// After Mac/Artisan drops SPP, bounce the server and fail-safe heater.
-static void serviceBluetooth() {
-  static bool hadClient = false;
-  bool client = btHasClient();
-
-  if (hadClient && !client) {
-    if (gArtisanPort == static_cast<Print*>(&SerialBT)) {
-      levelOT1 = 0;
-      heatAllOff();
-      gArtisanPort = nullptr;
-      roastQuiet = false;
-      Serial.println(F("# BT dropped — OT1 cut (fan holds last OT2)"));
-    } else {
-      Serial.println(F("# BT client gone"));
-    }
-    btNeedRestart = true;
-  } else if (client && !hadClient) {
-    Serial.println(F("# BT client connected"));
-  }
-  hadClient = client;
-
-  if (btNeedRestart && !client) {
-    btNeedRestart = false;
-    btRestartStack("disconnect");
-    hadClient = false;
-  }
-}
-
 // Declared later — .ino prototype gen breaks templates, so no template<> helpers
 extern bool rawTempMode;
 extern bool heatPulseActive;
@@ -1156,6 +1128,35 @@ static void serviceSerial() {
     serviceOnePort(SerialBT, cmdBufBt, lastByteBt);
   } else if (cmdBufBt.length()) {
     cmdBufBt = "";  // drop partial if client gone
+  }
+}
+
+// After Mac/Artisan drops SPP, bounce the server and fail-safe heater.
+// (Defined here so levelOT1 / heatAllOff are in scope — Arduino .ino is picky.)
+static void serviceBluetooth() {
+  static bool hadClient = false;
+  bool client = btHasClient();
+
+  if (hadClient && !client) {
+    if (gArtisanPort == static_cast<Print*>(&SerialBT)) {
+      levelOT1 = 0;
+      heatAllOff();
+      gArtisanPort = nullptr;
+      roastQuiet = false;
+      Serial.println(F("# BT dropped — OT1 cut (fan holds last OT2)"));
+    } else {
+      Serial.println(F("# BT client gone"));
+    }
+    btNeedRestart = true;
+  } else if (client && !hadClient) {
+    Serial.println(F("# BT client connected"));
+  }
+  hadClient = client;
+
+  if (btNeedRestart && !client) {
+    btNeedRestart = false;
+    btRestartStack("disconnect");
+    hadClient = false;
   }
 }
 
